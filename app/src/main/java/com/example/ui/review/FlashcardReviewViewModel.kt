@@ -3,23 +3,24 @@ package com.example.ui.review
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.example.data.model.LearningStatus
 import com.example.data.model.ReviewDirection
 import com.example.data.model.ReviewState
 import com.example.data.model.VocabularyWord
-import com.example.data.model.WordWithReviewStates
 import com.example.data.repository.ReviewRating
 import com.example.data.repository.VocabularyRepository
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 data class FlashcardItem(
     val word: VocabularyWord,
-    val reviewState: ReviewState
+    val reviewState: ReviewState,
+    val isInSessionRelearning: Boolean = false
 )
 
 data class ReviewUiState(
@@ -30,55 +31,98 @@ data class ReviewUiState(
 )
 
 class FlashcardReviewViewModel(
-    private val repository: VocabularyRepository
+    private val repository: VocabularyRepository,
+    val maxNewCardsPerDay: Int = 20,
+    private val dispatcher: CoroutineDispatcher = Dispatchers.Main
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(ReviewUiState())
-    val uiState: StateFlow<ReviewUiState> = _uiState
+    val uiState: StateFlow<ReviewUiState> = _uiState.asStateFlow()
 
-    val dueFlashcards: StateFlow<List<FlashcardItem>> = combine(
-        repository.wordsWithReviewStates,
-        _uiState
-    ) { allWords, state ->
-        val list = mutableListOf<FlashcardItem>()
+    private val _dueFlashcards = MutableStateFlow<List<FlashcardItem>>(emptyList())
+    val dueFlashcards: StateFlow<List<FlashcardItem>> = _dueFlashcards.asStateFlow()
+
+    init {
+        buildSessionQueue(_uiState.value.direction)
+    }
+
+    fun buildSessionQueue(direction: ReviewDirection) = viewModelScope.launch(dispatcher) {
+        val now = System.currentTimeMillis()
+        val allWords = repository.getWordsWithReviewStatesSnapshot()
+        val dueReviewCards = mutableListOf<FlashcardItem>()
+        val newCards = mutableListOf<FlashcardItem>()
+
         for (item in allWords) {
-            val matchingState = item.reviewStates.find { it.direction == state.direction }
-            if (matchingState != null) {
-                list.add(FlashcardItem(item.word, matchingState))
+            val state = item.reviewStates.find { it.direction == direction } ?: continue
+            if (state.status == LearningStatus.NEW) {
+                newCards.add(FlashcardItem(item.word, state))
+            } else if (state.nextReviewDate <= now) {
+                dueReviewCards.add(FlashcardItem(item.word, state))
             }
         }
-        list
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+        // Order due review cards by nextReviewDate
+        dueReviewCards.sortBy { it.reviewState.nextReviewDate }
+
+        // Take at most N new cards (configurable, default 20)
+        val frozenQueue = dueReviewCards + newCards.take(maxNewCardsPerDay)
+
+        _dueFlashcards.value = frozenQueue
+        _uiState.update {
+            it.copy(
+                direction = direction,
+                currentIndex = 0,
+                completedCount = 0,
+                isFlipped = false
+            )
+        }
+    }
 
     fun setDirection(direction: ReviewDirection) {
-        _uiState.update { it.copy(direction = direction, currentIndex = 0, isFlipped = false) }
+        buildSessionQueue(direction)
     }
 
     fun flipCard() {
         _uiState.update { it.copy(isFlipped = !it.isFlipped) }
     }
 
-    fun answerCard(item: FlashcardItem, rating: ReviewRating) {
-        viewModelScope.launch {
+    fun answerCard(item: FlashcardItem, rating: ReviewRating) = viewModelScope.launch(dispatcher) {
+        // 1. Only persist to FSRS if this is not an in-session relearning drill
+        if (!item.isInSessionRelearning) {
             repository.recordReview(item.reviewState, rating)
-            _uiState.update {
-                it.copy(
-                    isFlipped = false,
-                    completedCount = it.completedCount + 1,
-                    currentIndex = it.currentIndex + 1
-                )
-            }
+        }
+
+        // 2. In-session relearning: when answered AGAIN, re-queue card after about 5-8 cards
+        if (rating == ReviewRating.AGAIN) {
+            val currentQueue = _dueFlashcards.value.toMutableList()
+            val curIndex = _uiState.value.currentIndex
+            val offset = 6 // about 5-8 other cards
+            val targetIndex = minOf(currentQueue.size, curIndex + 1 + offset)
+            currentQueue.add(targetIndex, item.copy(isInSessionRelearning = true))
+            _dueFlashcards.value = currentQueue
+        }
+
+        // 3. Advance to next card
+        _uiState.update {
+            it.copy(
+                isFlipped = false,
+                completedCount = it.completedCount + 1,
+                currentIndex = it.currentIndex + 1
+            )
         }
     }
 
     fun restartSession() {
-        _uiState.update { it.copy(currentIndex = 0, isFlipped = false) }
+        buildSessionQueue(_uiState.value.direction)
     }
 
-    class Factory(private val repository: VocabularyRepository) : ViewModelProvider.Factory {
+    class Factory(
+        private val repository: VocabularyRepository,
+        private val maxNewCardsPerDay: Int = 20
+    ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
-            return FlashcardReviewViewModel(repository) as T
+            return FlashcardReviewViewModel(repository, maxNewCardsPerDay) as T
         }
     }
 }

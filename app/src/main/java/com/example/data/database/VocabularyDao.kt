@@ -37,10 +37,10 @@ interface VocabularyDao {
     @Query("SELECT COUNT(*) FROM vocabulary_words")
     fun getWordCount(): Flow<Int>
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insertWord(word: VocabularyWord): Long
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insertWords(words: List<VocabularyWord>): List<Long>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
@@ -62,15 +62,15 @@ interface VocabularyDao {
 
     /**
      * Batch import transaction:
-     * Inserts words and generates initial independent review states for each direction
+     * Inserts words and generates initial independent review state for GERMAN_TO_ARABIC
      * with NEW status and FSRS-6 initial baseline (difficulty=0.0, stability=0.0, lapses=0).
+     * ARABIC_TO_GERMAN will be created once GERMAN_TO_ARABIC reaches REVIEW status.
      */
     @Transaction
     suspend fun batchImportWithReviewStates(
         words: List<VocabularyWord>,
         directions: List<ReviewDirection> = listOf(
-            ReviewDirection.GERMAN_TO_ARABIC,
-            ReviewDirection.ARABIC_TO_GERMAN
+            ReviewDirection.GERMAN_TO_ARABIC
         )
     ): List<Long> {
         val insertedIds = mutableListOf<Long>()

@@ -5,6 +5,7 @@ import com.example.data.database.VocabularyDao
 import com.example.data.fsrs.Fsrs6Scheduler
 import com.example.data.fsrs.FsrsScheduleResult
 import com.example.data.fsrs.FsrsScheduler
+import com.example.data.model.LearningStatus
 import com.example.data.model.ReviewDirection
 import com.example.data.model.ReviewLog
 import com.example.data.model.ReviewState
@@ -32,6 +33,7 @@ interface VocabularyRepository {
     suspend fun getWordsWithReviewStatesSnapshot(): List<WordWithReviewStates>
     fun getWordsByTopic(topic: String): Flow<List<VocabularyWord>>
     suspend fun insertWord(word: VocabularyWord): Long
+    suspend fun updateWord(word: VocabularyWord)
     suspend fun batchImport(words: List<VocabularyWord>): List<Long>
     suspend fun deleteWord(word: VocabularyWord)
     suspend fun recordReview(state: ReviewState, rating: ReviewRating): FsrsScheduleResult
@@ -66,6 +68,10 @@ class VocabularyRepositoryImpl(
         vocabularyDao.insertWord(word)
     }
 
+    override suspend fun updateWord(word: VocabularyWord) = withContext(Dispatchers.IO) {
+        vocabularyDao.updateWord(word)
+    }
+
     override suspend fun batchImport(words: List<VocabularyWord>): List<Long> =
         withContext(Dispatchers.IO) {
             vocabularyDao.batchImportWithReviewStates(words)
@@ -81,6 +87,32 @@ class VocabularyRepositoryImpl(
             val result = fsrsScheduler.schedule(state, rating, now)
             reviewStateDao.updateReviewState(result.updatedState)
             reviewStateDao.insertReviewLog(result.log)
+
+            // When German-to-Arabic state first reaches REVIEW (or MASTERED), create ARABIC_TO_GERMAN
+            if (state.direction == ReviewDirection.GERMAN_TO_ARABIC &&
+                (result.updatedState.status == LearningStatus.REVIEW || result.updatedState.status == LearningStatus.MASTERED)
+            ) {
+                val existingStates = reviewStateDao.getReviewStatesForWord(state.wordId)
+                val hasArToDe = existingStates.any { it.direction == ReviewDirection.ARABIC_TO_GERMAN }
+                if (!hasArToDe) {
+                    reviewStateDao.insertReviewState(
+                        ReviewState(
+                            wordId = state.wordId,
+                            direction = ReviewDirection.ARABIC_TO_GERMAN,
+                            status = LearningStatus.NEW,
+                            repetitionCount = 0,
+                            lapses = 0,
+                            difficulty = 0.0,
+                            stability = 0.0,
+                            intervalDays = 0,
+                            nextReviewDate = now,
+                            lastReviewedDate = null,
+                            easeFactor = null
+                        )
+                    )
+                }
+            }
+
             result
         }
 

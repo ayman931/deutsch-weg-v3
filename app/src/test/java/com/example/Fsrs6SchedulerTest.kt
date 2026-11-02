@@ -13,6 +13,8 @@ import com.example.data.model.VocabularyWord
 import com.example.data.model.WordType
 import com.example.data.repository.ReviewRating
 import com.example.data.repository.VocabularyRepositoryImpl
+import com.example.ui.review.FlashcardReviewViewModel
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -420,7 +422,7 @@ class Fsrs6SchedulerTest {
 
         // Successfully recalling long-overdue card produces substantial memory reinforcement
         assertTrue("Stability should increase after recalling an overdue card", resultOverdueGood.updatedState.stability > matureState.stability)
-        assertEquals(LearningStatus.REVIEW, resultOverdueGood.updatedState.status)
+        assertTrue("Status must be MASTERED or REVIEW", resultOverdueGood.updatedState.status == LearningStatus.MASTERED || resultOverdueGood.updatedState.status == LearningStatus.REVIEW)
     }
 
     @Test
@@ -516,5 +518,227 @@ class Fsrs6SchedulerTest {
         assertEquals(scheduler.parameters[0], state.stability, 0.001) // 0.212
         assertEquals(scheduler.initDifficulty(1), state.difficulty, 0.001)
         assertEquals(5, state.repetitionCount)
+    }
+
+    @Test
+    fun testSessionQueueBuiltOnceWithDueAndConfigurableNewCards() = runBlocking {
+        val now = System.currentTimeMillis()
+        // Insert 2 due words (nextReviewDate in the past)
+        val w1 = VocabularyWord(german = "Apfel", wordType = WordType.NOUN, arabic = "تفاح", topic = "Essen")
+        val w2 = VocabularyWord(german = "Brot", wordType = WordType.NOUN, arabic = "خبز", topic = "Essen")
+        val id1 = repository.insertWord(w1)
+        val id2 = repository.insertWord(w2)
+
+        database.reviewStateDao().insertReviewState(
+            ReviewState(wordId = id1, direction = ReviewDirection.GERMAN_TO_ARABIC, status = LearningStatus.LEARNING, nextReviewDate = now - 10000)
+        )
+        database.reviewStateDao().insertReviewState(
+            ReviewState(wordId = id2, direction = ReviewDirection.GERMAN_TO_ARABIC, status = LearningStatus.REVIEW, nextReviewDate = now - 50000)
+        )
+
+        // Insert 1 card not due yet (future nextReviewDate)
+        val w3 = VocabularyWord(german = "Milch", wordType = WordType.NOUN, arabic = "حليب", topic = "Essen")
+        val id3 = repository.insertWord(w3)
+        database.reviewStateDao().insertReviewState(
+            ReviewState(wordId = id3, direction = ReviewDirection.GERMAN_TO_ARABIC, status = LearningStatus.REVIEW, nextReviewDate = now + 100000)
+        )
+
+        // Insert 5 new cards
+        for (i in 1..5) {
+            val wNew = VocabularyWord(german = "Wort$i", wordType = WordType.NOUN, arabic = "كلمة$i", topic = "Test")
+            val idNew = repository.insertWord(wNew)
+            database.reviewStateDao().insertReviewState(
+                ReviewState(wordId = idNew, direction = ReviewDirection.GERMAN_TO_ARABIC, status = LearningStatus.NEW, nextReviewDate = now)
+            )
+        }
+
+        // Configure maxNewCardsPerDay = 2 with Unconfined dispatcher for synchronous testing
+        val viewModel = FlashcardReviewViewModel(repository, maxNewCardsPerDay = 2, dispatcher = kotlinx.coroutines.Dispatchers.Unconfined)
+        viewModel.buildSessionQueue(ReviewDirection.GERMAN_TO_ARABIC).join()
+
+        val queue = viewModel.dueFlashcards.value
+        // Expected: 2 due cards + at most 2 new cards = 4 cards total (future card w3 omitted, extra 3 new cards omitted)
+        assertEquals(4, queue.size)
+        // First due card must be id2 (ordered by nextReviewDate: now - 50000 < now - 10000)
+        assertEquals(id2, queue[0].word.id)
+        assertEquals(id1, queue[1].word.id)
+        // The remaining 2 cards are NEW
+        assertEquals(LearningStatus.NEW, queue[2].reviewState.status)
+        assertEquals(LearningStatus.NEW, queue[3].reviewState.status)
+    }
+
+    @Test
+    fun testInSessionRelearningCardReinsertionAndSchedulePreserved() = runBlocking {
+        val now = System.currentTimeMillis()
+        for (i in 1..10) {
+            val w = VocabularyWord(german = "Karte$i", wordType = WordType.NOUN, arabic = "بطاقة$i", topic = "Test")
+            val wid = repository.insertWord(w)
+            database.reviewStateDao().insertReviewState(
+                ReviewState(wordId = wid, direction = ReviewDirection.GERMAN_TO_ARABIC, status = LearningStatus.REVIEW, nextReviewDate = now - (1000L * i))
+            )
+        }
+
+        val viewModel = FlashcardReviewViewModel(repository, maxNewCardsPerDay = 20, dispatcher = kotlinx.coroutines.Dispatchers.Unconfined)
+        viewModel.buildSessionQueue(ReviewDirection.GERMAN_TO_ARABIC).join()
+        assertEquals(10, viewModel.dueFlashcards.value.size)
+
+        val firstCard = viewModel.dueFlashcards.value.first()
+
+        // Answer AGAIN on first card
+        viewModel.answerCard(firstCard, ReviewRating.AGAIN).join()
+        // Queue size should now be 11 (original 10 + 1 relearning reinserted)
+        val updatedQueue = viewModel.dueFlashcards.value
+        assertEquals(11, updatedQueue.size)
+
+        // Card was reinserted after about 5-8 cards: targetIndex = min(10, 0 + 1 + 6) = 7
+        val reinsertedCard = updatedQueue[7]
+        assertEquals(firstCard.word.id, reinsertedCard.word.id)
+        assertTrue("Reinserted card must be marked as in-session relearning", reinsertedCard.isInSessionRelearning)
+
+        // Check the persisted FSRS schedule in the database
+        val persistedStateAfterAgain = database.reviewStateDao().getReviewStatesForWord(firstCard.word.id).first()
+        val persistedNextReviewDate = persistedStateAfterAgain.nextReviewDate
+        assertEquals(LearningStatus.RELEARNING, persistedStateAfterAgain.status)
+
+        // Now answer the in-session relearning card with GOOD
+        viewModel.answerCard(reinsertedCard, ReviewRating.GOOD).join()
+
+        // The persisted FSRS schedule must remain unchanged!
+        val persistedStateAfterRelearningGood = database.reviewStateDao().getReviewStatesForWord(firstCard.word.id).first()
+        assertEquals(persistedNextReviewDate, persistedStateAfterRelearningGood.nextReviewDate)
+        assertEquals(persistedStateAfterAgain.stability, persistedStateAfterRelearningGood.stability, 0.0001)
+    }
+
+    @Test
+    fun testFsrs6ElapsedDaysContinuousDoubleDivision() {
+        val now = 1700000000000L
+        val halfDayAgo = now - 43_200_000L // 0.5 days ago
+
+        val state = ReviewState(
+            id = 50,
+            wordId = 300,
+            direction = ReviewDirection.GERMAN_TO_ARABIC,
+            status = LearningStatus.REVIEW,
+            repetitionCount = 2,
+            lapses = 0,
+            difficulty = 3.0,
+            stability = 5.0,
+            intervalDays = 5,
+            lastReviewedDate = halfDayAgo
+        )
+
+        // When scheduled, elapsedDays = (now - lastReviewedDate).toDouble() / DAY_IN_MS = 0.5 (continuous, not integer division)
+        val result = scheduler.schedule(state, ReviewRating.GOOD, now)
+        assertNotNull(result.updatedState)
+        assertTrue(result.updatedState.stability > 0.0)
+    }
+
+    @Test
+    fun testMasteredStatusDefinitionAndCounts() = runBlocking {
+        // 1. Scheduler sets status to MASTERED when review status and intervalDays >= 21
+        val matureState = ReviewState(
+            id = 60,
+            wordId = 301,
+            direction = ReviewDirection.GERMAN_TO_ARABIC,
+            status = LearningStatus.REVIEW,
+            repetitionCount = 4,
+            lapses = 0,
+            difficulty = 2.0,
+            stability = 25.0,
+            intervalDays = 25,
+            lastReviewedDate = 1700000000000L
+        )
+        val reviewResult = scheduler.schedule(matureState, ReviewRating.GOOD, 1700000000000L + 25 * 86400000L)
+        assertTrue("Interval days must be >= 21", reviewResult.updatedState.intervalDays >= 21)
+        assertEquals(LearningStatus.MASTERED, reviewResult.updatedState.status)
+
+        // 2. ReviewStateDao.countByStatus counts status REVIEW with intervalDays >= 21 as MASTERED
+        val word1 = VocabularyWord(german = "Meister1", wordType = WordType.NOUN, arabic = "استاذ1", topic = "T")
+        val word2 = VocabularyWord(german = "Meister2", wordType = WordType.NOUN, arabic = "استاذ2", topic = "T")
+        val word3 = VocabularyWord(german = "ReviewCard", wordType = WordType.NOUN, arabic = "مراجعة", topic = "T")
+        val w1Id = repository.insertWord(word1)
+        val w2Id = repository.insertWord(word2)
+        val w3Id = repository.insertWord(word3)
+
+        // w1: status MASTERED, intervalDays 30
+        database.reviewStateDao().insertReviewState(
+            ReviewState(wordId = w1Id, direction = ReviewDirection.GERMAN_TO_ARABIC, status = LearningStatus.MASTERED, intervalDays = 30)
+        )
+        // w2: status REVIEW, intervalDays 25 (defined as MASTERED)
+        database.reviewStateDao().insertReviewState(
+            ReviewState(wordId = w2Id, direction = ReviewDirection.GERMAN_TO_ARABIC, status = LearningStatus.REVIEW, intervalDays = 25)
+        )
+        // w3: status REVIEW, intervalDays 10 (< 21, remaining in REVIEW)
+        database.reviewStateDao().insertReviewState(
+            ReviewState(wordId = w3Id, direction = ReviewDirection.GERMAN_TO_ARABIC, status = LearningStatus.REVIEW, intervalDays = 10)
+        )
+
+        val masteredCount = database.reviewStateDao().countByStatus(LearningStatus.MASTERED).first()
+        val reviewCount = database.reviewStateDao().countByStatus(LearningStatus.REVIEW).first()
+
+        assertEquals(2, masteredCount)
+        assertEquals(1, reviewCount)
+    }
+
+    @Test
+    fun testBatchImportCreatesOnlyGermanToArabicAndUnlocksArabicToGermanOnReview() = runBlocking {
+        val words = listOf(
+            VocabularyWord(german = "Katze", wordType = WordType.NOUN, article = Article.DIE, arabic = "قطة", topic = "Tiere")
+        )
+
+        // 1. Batch import creates only GERMAN_TO_ARABIC
+        repository.batchImport(words)
+
+        val wordsWithStates = repository.getWordsWithReviewStatesSnapshot()
+        assertEquals(1, wordsWithStates.size)
+        val initialStates = wordsWithStates.first().reviewStates
+        assertEquals(1, initialStates.size)
+        assertEquals(ReviewDirection.GERMAN_TO_ARABIC, initialStates.first().direction)
+        assertEquals(LearningStatus.NEW, initialStates.first().status)
+
+        // 2. Review the German-to-Arabic state with EASY -> graduates to REVIEW
+        val deToArState = initialStates.first()
+        repository.recordReview(deToArState, ReviewRating.EASY)
+
+        // 3. ARABIC_TO_GERMAN direction must now be automatically created with status NEW!
+        val statesAfterReview = database.reviewStateDao().getReviewStatesForWord(wordsWithStates.first().word.id)
+        assertEquals(2, statesAfterReview.size)
+        val arToDeState = statesAfterReview.find { it.direction == ReviewDirection.ARABIC_TO_GERMAN }
+        assertNotNull(arToDeState)
+        assertEquals(LearningStatus.NEW, arToDeState!!.status)
+    }
+
+    @Test
+    fun testUpdateWordPreservesReviewStatesAndLogs() = runBlocking {
+        val word = VocabularyWord(german = "Sonne", wordType = WordType.NOUN, article = Article.DIE, arabic = "شمس", topic = "Natur")
+        val wordId = repository.insertWord(word)
+
+        val state = ReviewState(wordId = wordId, direction = ReviewDirection.GERMAN_TO_ARABIC, status = LearningStatus.NEW)
+        val stateId = database.reviewStateDao().insertReviewState(state)
+
+        // Record a review to create review logs
+        val loadedState = database.reviewStateDao().getReviewStatesForWord(wordId).first()
+        repository.recordReview(loadedState, ReviewRating.GOOD)
+
+        val statesBefore = database.reviewStateDao().getReviewStatesForWord(wordId)
+        val logsBefore = repository.getReviewLogs(stateId)
+        assertEquals(1, statesBefore.size)
+        assertEquals(1, logsBefore.size)
+
+        // Edit word using updateWord
+        val updatedWord = word.copy(id = wordId, arabic = "شمس مشرقة", exampleSentence = "Die Sonne scheint.")
+        repository.updateWord(updatedWord)
+
+        // Word should be updated
+        val retrievedWord = database.vocabularyDao().getWordById(wordId)
+        assertNotNull(retrievedWord)
+        assertEquals("شمس مشرقة", retrievedWord!!.arabic)
+        assertEquals("Die Sonne scheint.", retrievedWord.exampleSentence)
+
+        // Review states and logs MUST NOT be deleted!
+        val statesAfter = database.reviewStateDao().getReviewStatesForWord(wordId)
+        val logsAfter = repository.getReviewLogs(stateId)
+        assertEquals(1, statesAfter.size)
+        assertEquals(1, logsAfter.size)
     }
 }

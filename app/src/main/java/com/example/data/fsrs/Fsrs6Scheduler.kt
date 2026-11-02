@@ -176,7 +176,7 @@ class Fsrs6Scheduler(
         val isFirstReview = currentState.status == LearningStatus.NEW || currentState.stability <= 0.0
 
         val elapsedDays: Double = if (currentState.lastReviewedDate != null) {
-            max(0.0, ((now - currentState.lastReviewedDate) / DAY_IN_MS).toDouble())
+            max(0.0, (now - currentState.lastReviewedDate).toDouble() / DAY_IN_MS)
         } else {
             0.0
         }
@@ -235,10 +235,15 @@ class Fsrs6Scheduler(
         }
 
         val intervalDays = nextInterval(newStability)
+        val finalStatus = if (newStatus == LearningStatus.REVIEW && intervalDays >= 21) {
+            LearningStatus.MASTERED
+        } else {
+            newStatus
+        }
         val nextReviewTimestamp = now + (intervalDays * DAY_IN_MS)
 
         val updatedState = currentState.copy(
-            status = newStatus,
+            status = finalStatus,
             repetitionCount = currentState.repetitionCount + 1,
             lapses = newLapses,
             difficulty = newDifficulty,

@@ -37,6 +37,13 @@ interface ReviewStateDao {
     @Query("SELECT * FROM review_logs WHERE reviewStateId = :reviewStateId ORDER BY reviewTimestamp DESC")
     suspend fun getLogsForReviewState(reviewStateId: Long): List<ReviewLog>
 
-    @Query("SELECT COUNT(*) FROM review_states WHERE status = :status")
+    @Query("""
+        SELECT COUNT(*) FROM review_states 
+        WHERE CASE 
+            WHEN (status = 'REVIEW' OR status = 'MASTERED') AND intervalDays >= 21 THEN 'MASTERED'
+            WHEN status = 'MASTERED' AND intervalDays < 21 THEN 'REVIEW'
+            ELSE status 
+        END = :status
+    """)
     fun countByStatus(status: LearningStatus): Flow<Int>
 }

@@ -35,4 +35,13 @@ data class ReviewState(
     val nextReviewDate: Long = System.currentTimeMillis(),
     val lastReviewedDate: Long? = null,
     val easeFactor: Float? = null // Legacy SM-2 parameter preserved for backward-compatible migration
-)
+) {
+    val effectiveStatus: LearningStatus
+        get() = if ((status == LearningStatus.REVIEW || status == LearningStatus.MASTERED) && intervalDays >= 21) {
+            LearningStatus.MASTERED
+        } else if (status == LearningStatus.MASTERED && intervalDays < 21) {
+            LearningStatus.REVIEW
+        } else {
+            status
+        }
+}

@@ -266,7 +266,7 @@ fun WordItemCard(
     val w = item.word
 
     // Determine overall learning status from review states
-    val overallStatus = item.reviewStates.map { it.status }.minByOrNull { it.ordinal } ?: LearningStatus.NEW
+    val overallStatus = item.reviewStates.map { it.effectiveStatus }.minByOrNull { it.ordinal } ?: LearningStatus.NEW
 
     Card(
         shape = RoundedCornerShape(12.dp),

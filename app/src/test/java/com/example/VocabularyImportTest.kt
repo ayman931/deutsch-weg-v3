@@ -310,17 +310,14 @@ class VocabularyImportTest {
         val allWords = database.vocabularyDao().getAllWordsSnapshot()
         assertEquals(2, allWords.size)
 
-        // Verify independent review states for each direction
+        // Verify only GERMAN_TO_ARABIC review state is created initially at import
         val wordsWithStates = database.vocabularyDao().getWordsWithReviewStatesSnapshot()
         assertEquals(2, wordsWithStates.size)
 
         for (item in wordsWithStates) {
             val states = item.reviewStates
-            assertEquals(2, states.size)
-
-            val directions = states.map { it.direction }.toSet()
-            assertTrue(directions.contains(ReviewDirection.GERMAN_TO_ARABIC))
-            assertTrue(directions.contains(ReviewDirection.ARABIC_TO_GERMAN))
+            assertEquals(1, states.size)
+            assertEquals(ReviewDirection.GERMAN_TO_ARABIC, states.first().direction)
 
             for (state in states) {
                 // Must be initialized with NEW learning status and unfabricated history

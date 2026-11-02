@@ -67,6 +67,12 @@ class VocabularyViewModel(
         }
     }
 
+    fun updateWord(word: VocabularyWord) {
+        viewModelScope.launch {
+            repository.updateWord(word)
+        }
+    }
+
     class Factory(private val repository: VocabularyRepository) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
