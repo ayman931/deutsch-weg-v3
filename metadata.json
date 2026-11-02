@@ -1,0 +1,6 @@
+{
+  "name": "Deutsch Weg",
+  "description": "Native German vocabulary flashcard app with offline JSON import, linguistic analysis, and bidirectional spaced repetition review.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
