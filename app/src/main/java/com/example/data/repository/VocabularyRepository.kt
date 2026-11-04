@@ -38,6 +38,12 @@ interface VocabularyRepository {
     suspend fun deleteWord(word: VocabularyWord)
     suspend fun recordReview(state: ReviewState, rating: ReviewRating): FsrsScheduleResult
     suspend fun getReviewLogs(reviewStateId: Long): List<ReviewLog>
+    suspend fun countNewCardsReviewedSince(direction: ReviewDirection, startOfTodayTimestamp: Long): Int
+    fun countByStatus(status: LearningStatus): Flow<Int>
+    suspend fun getAllReviewStatesSnapshot(): List<ReviewState>
+    suspend fun getAllReviewLogsSnapshot(): List<ReviewLog>
+    suspend fun exportBackupJson(): String
+    suspend fun restoreBackupJson(jsonString: String): Result<Int>
 }
 
 class VocabularyRepositoryImpl(
@@ -120,4 +126,34 @@ class VocabularyRepositoryImpl(
         withContext(Dispatchers.IO) {
             reviewStateDao.getLogsForReviewState(reviewStateId)
         }
+
+    override suspend fun countNewCardsReviewedSince(
+        direction: ReviewDirection,
+        startOfTodayTimestamp: Long
+    ): Int = withContext(Dispatchers.IO) {
+        reviewStateDao.countNewCardsReviewedSince(direction, startOfTodayTimestamp)
+    }
+
+    override fun countByStatus(status: LearningStatus): Flow<Int> =
+        reviewStateDao.countByStatus(status)
+
+    override suspend fun getAllReviewStatesSnapshot(): List<ReviewState> =
+        withContext(Dispatchers.IO) {
+            reviewStateDao.getAllReviewStatesSnapshot()
+        }
+
+    override suspend fun getAllReviewLogsSnapshot(): List<ReviewLog> =
+        withContext(Dispatchers.IO) {
+            reviewStateDao.getAllReviewLogsSnapshot()
+        }
+
+    private val backupManager by lazy {
+        com.example.data.importer.BackupManager(vocabularyDao, reviewStateDao)
+    }
+
+    override suspend fun exportBackupJson(): String =
+        backupManager.exportBackupJson()
+
+    override suspend fun restoreBackupJson(jsonString: String): Result<Int> =
+        backupManager.restoreBackupJson(jsonString)
 }

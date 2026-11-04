@@ -240,7 +240,12 @@ class Fsrs6Scheduler(
         } else {
             newStatus
         }
-        val nextReviewTimestamp = now + (intervalDays * DAY_IN_MS)
+        val targetTimestamp = now + (intervalDays * DAY_IN_MS)
+        val nextReviewTimestamp = if (intervalDays >= 1) {
+            com.example.data.util.DateTimeUtils.getStartOfLocalDay(targetTimestamp)
+        } else {
+            targetTimestamp
+        }
 
         val updatedState = currentState.copy(
             status = finalStatus,

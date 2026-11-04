@@ -46,4 +46,28 @@ interface ReviewStateDao {
         END = :status
     """)
     fun countByStatus(status: LearningStatus): Flow<Int>
+
+    @Query("""
+        SELECT COUNT(*) FROM review_logs l
+        INNER JOIN review_states s ON l.reviewStateId = s.id
+        WHERE l.status = 'NEW' 
+          AND s.direction = :direction 
+          AND l.reviewTimestamp >= :startOfTodayTimestamp
+    """)
+    suspend fun countNewCardsReviewedSince(direction: ReviewDirection, startOfTodayTimestamp: Long): Int
+
+    @Query("SELECT * FROM review_states")
+    suspend fun getAllReviewStatesSnapshot(): List<ReviewState>
+
+    @Query("SELECT * FROM review_logs")
+    suspend fun getAllReviewLogsSnapshot(): List<ReviewLog>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertReviewLogs(logs: List<ReviewLog>): List<Long>
+
+    @Query("DELETE FROM review_states")
+    suspend fun deleteAllReviewStates()
+
+    @Query("DELETE FROM review_logs")
+    suspend fun deleteAllReviewLogs()
 }

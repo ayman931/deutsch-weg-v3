@@ -11,6 +11,8 @@ enum class WordType(val displayNameDe: String, val displayNameEn: String) {
     PHRASE("Redewendung", "Phrase"),
     OTHER("Sonstiges", "Other");
 
+    val displayName: String get() = displayNameDe
+
     companion object {
         fun from(raw: String?): WordType? {
             if (raw.isNullOrBlank()) return null

@@ -46,11 +46,17 @@ interface VocabularyDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertReviewStates(states: List<ReviewState>): List<Long>
 
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun restoreWords(words: List<VocabularyWord>): List<Long>
+
     @Update
     suspend fun updateWord(word: VocabularyWord)
 
     @Delete
     suspend fun deleteWord(word: VocabularyWord)
+
+    @Query("DELETE FROM vocabulary_words")
+    suspend fun deleteAllWords()
 
     @Transaction
     @Query("SELECT * FROM vocabulary_words ORDER BY createdAt DESC")

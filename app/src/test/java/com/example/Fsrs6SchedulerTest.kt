@@ -536,11 +536,11 @@ class Fsrs6SchedulerTest {
             ReviewState(wordId = id2, direction = ReviewDirection.GERMAN_TO_ARABIC, status = LearningStatus.REVIEW, nextReviewDate = now - 50000)
         )
 
-        // Insert 1 card not due yet (future nextReviewDate)
+        // Insert 1 card not due yet (future nextReviewDate beyond end of today)
         val w3 = VocabularyWord(german = "Milch", wordType = WordType.NOUN, arabic = "حليب", topic = "Essen")
         val id3 = repository.insertWord(w3)
         database.reviewStateDao().insertReviewState(
-            ReviewState(wordId = id3, direction = ReviewDirection.GERMAN_TO_ARABIC, status = LearningStatus.REVIEW, nextReviewDate = now + 100000)
+            ReviewState(wordId = id3, direction = ReviewDirection.GERMAN_TO_ARABIC, status = LearningStatus.REVIEW, nextReviewDate = now + 86400000L * 2)
         )
 
         // Insert 5 new cards
@@ -740,5 +740,153 @@ class Fsrs6SchedulerTest {
         val logsAfter = repository.getReviewLogs(stateId)
         assertEquals(1, statesAfter.size)
         assertEquals(1, logsAfter.size)
+    }
+
+    @Test
+    fun testTrulyPerDayNewCardsLimitCountedFromReviewLogsToday() = runBlocking {
+        val now = System.currentTimeMillis()
+        val startOfToday = com.example.data.util.DateTimeUtils.getStartOfLocalDay(now)
+
+        // Insert 10 new cards
+        val newCardIds = mutableListOf<Long>()
+        for (i in 1..10) {
+            val wid = repository.insertWord(
+                VocabularyWord(german = "Neu$i", wordType = WordType.NOUN, arabic = "جديد$i", topic = "Test")
+            )
+            val sid = database.reviewStateDao().insertReviewState(
+                ReviewState(wordId = wid, direction = ReviewDirection.GERMAN_TO_ARABIC, status = LearningStatus.NEW)
+            )
+            newCardIds.add(sid)
+        }
+
+        // Simulate that 3 new cards were reviewed earlier today (review_logs with status == NEW and reviewTimestamp >= startOfToday)
+        for (i in 0..2) {
+            database.reviewStateDao().insertReviewLog(
+                com.example.data.model.ReviewLog(
+                    reviewStateId = newCardIds[i],
+                    rating = ReviewRating.GOOD,
+                    status = LearningStatus.NEW,
+                    difficulty = 4.0,
+                    stability = 2.0,
+                    elapsedDays = 0,
+                    scheduledDays = 2,
+                    reviewTimestamp = startOfToday + 3600_000L // 1 hour into today
+                )
+            )
+        }
+
+        // Also simulate an old review log from yesterday to ensure it is not counted against today
+        database.reviewStateDao().insertReviewLog(
+            com.example.data.model.ReviewLog(
+                reviewStateId = newCardIds[3],
+                rating = ReviewRating.GOOD,
+                status = LearningStatus.NEW,
+                difficulty = 4.0,
+                stability = 2.0,
+                elapsedDays = 0,
+                scheduledDays = 2,
+                reviewTimestamp = startOfToday - 3600_000L // 1 hour before today
+            )
+        )
+
+        val reviewedCountToday = repository.countNewCardsReviewedSince(ReviewDirection.GERMAN_TO_ARABIC, startOfToday)
+        assertEquals(3, reviewedCountToday)
+
+        // When daily limit N = 5, since 3 have already been reviewed today, remaining quota is 5 - 3 = 2!
+        val viewModel = FlashcardReviewViewModel(
+            repository = repository,
+            maxNewCardsPerDay = 5,
+            dispatcher = kotlinx.coroutines.Dispatchers.Unconfined
+        )
+        viewModel.buildSessionQueue(ReviewDirection.GERMAN_TO_ARABIC).join()
+
+        val queue = viewModel.dueFlashcards.value
+        assertEquals(2, queue.size)
+    }
+
+    @Test
+    fun testStartOfLocalDayDueCalculationAndEndOfTodayCheck() = runBlocking {
+        val now = System.currentTimeMillis()
+        val startOfToday = com.example.data.util.DateTimeUtils.getStartOfLocalDay(now)
+        val endOfToday = com.example.data.util.DateTimeUtils.getEndOfLocalDay(now)
+
+        // Test 1: For intervalDays >= 1, nextReviewDate is set to the start of the local day
+        val state = ReviewState(
+            id = 1,
+            wordId = 10,
+            direction = ReviewDirection.GERMAN_TO_ARABIC,
+            status = LearningStatus.REVIEW,
+            difficulty = 5.0,
+            stability = 5.0,
+            intervalDays = 5,
+            lastReviewedDate = now - 5 * 86400000L
+        )
+        val result = scheduler.schedule(state, ReviewRating.GOOD, now)
+        assertTrue(result.updatedState.intervalDays >= 1)
+        val expectedStartOfTargetDay = com.example.data.util.DateTimeUtils.getStartOfLocalDay(now + result.updatedState.intervalDays * 86400000L)
+        assertEquals(expectedStartOfTargetDay, result.updatedState.nextReviewDate)
+
+        // Test 2: In FlashcardReviewViewModel, cards with nextReviewDate <= endOfToday are due today
+        val wid1 = repository.insertWord(VocabularyWord(german = "Gestern", wordType = WordType.ADVERB, arabic = "أمس", topic = "Zeit"))
+        val wid2 = repository.insertWord(VocabularyWord(german = "HeuteAbend", wordType = WordType.ADVERB, arabic = "مساء اليوم", topic = "Zeit"))
+        val wid3 = repository.insertWord(VocabularyWord(german = "Morgen", wordType = WordType.ADVERB, arabic = "غداً", topic = "Zeit"))
+
+        // Card 1: nextReviewDate was yesterday (start of today - 1 day)
+        database.reviewStateDao().insertReviewState(
+            ReviewState(wordId = wid1, direction = ReviewDirection.GERMAN_TO_ARABIC, status = LearningStatus.REVIEW, nextReviewDate = startOfToday - 86400000L)
+        )
+        // Card 2: nextReviewDate is today at 21:00 (due time inside today, nextReviewDate <= endOfToday)
+        database.reviewStateDao().insertReviewState(
+            ReviewState(wordId = wid2, direction = ReviewDirection.GERMAN_TO_ARABIC, status = LearningStatus.REVIEW, nextReviewDate = endOfToday - 1000L)
+        )
+        // Card 3: nextReviewDate is tomorrow (endOfToday + 1000L)
+        database.reviewStateDao().insertReviewState(
+            ReviewState(wordId = wid3, direction = ReviewDirection.GERMAN_TO_ARABIC, status = LearningStatus.REVIEW, nextReviewDate = endOfToday + 1000L)
+        )
+
+        val vm = FlashcardReviewViewModel(
+            repository = repository,
+            maxNewCardsPerDay = 0,
+            dispatcher = kotlinx.coroutines.Dispatchers.Unconfined
+        )
+        vm.buildSessionQueue(ReviewDirection.GERMAN_TO_ARABIC).join()
+
+        val queue = vm.dueFlashcards.value
+        // Both card 1 and card 2 are due today (<= endOfToday), while card 3 (tomorrow) is not due
+        assertEquals(2, queue.size)
+        assertTrue(queue.any { it.word.id == wid1 })
+        assertTrue(queue.any { it.word.id == wid2 })
+        assertTrue(queue.none { it.word.id == wid3 })
+    }
+
+    @Test
+    fun testPreventDoubleSubmissionInAnswerCard() = runBlocking {
+        val word = VocabularyWord(german = "Doppel", wordType = WordType.NOUN, arabic = "مزدوج", topic = "Test")
+        val wid = repository.insertWord(word)
+        val stateId = database.reviewStateDao().insertReviewState(
+            ReviewState(wordId = wid, direction = ReviewDirection.GERMAN_TO_ARABIC, status = LearningStatus.REVIEW, nextReviewDate = System.currentTimeMillis() - 10000L)
+        )
+
+        val vm = FlashcardReviewViewModel(
+            repository = repository,
+            maxNewCardsPerDay = 0,
+            dispatcher = kotlinx.coroutines.Dispatchers.Unconfined
+        )
+        vm.buildSessionQueue(ReviewDirection.GERMAN_TO_ARABIC).join()
+        val queue = vm.dueFlashcards.value
+        assertEquals(1, queue.size)
+
+        val card = queue.first()
+
+        // Call answerCard twice rapidly in the same turn
+        val job1 = vm.answerCard(card, ReviewRating.GOOD)
+        val job2 = vm.answerCard(card, ReviewRating.GOOD)
+        job1.join()
+        job2.join()
+
+        // Double submission must be ignored: exactly 1 log recorded
+        val logs = repository.getReviewLogs(stateId)
+        assertEquals(1, logs.size)
+        assertEquals(1, vm.uiState.value.completedCount)
     }
 }

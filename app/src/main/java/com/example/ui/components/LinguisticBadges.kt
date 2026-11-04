@@ -21,9 +21,9 @@ import com.example.data.model.LearningStatus
 import com.example.data.model.VocabularyWord
 import com.example.data.model.WordType
 
-val ColorArticleDer = Color(0xFF2563EB) // Blue (Masculine)
-val ColorArticleDie = Color(0xFFDC2626) // Red (Feminine)
-val ColorArticleDas = Color(0xFF16A34A) // Green (Neuter)
+val ColorArticleDer = Color(0xFF1D65D4) // Blue (Masculine)
+val ColorArticleDie = Color(0xFFD63346) // Red (Feminine)
+val ColorArticleDas = Color(0xFF1B806A) // Teal (Neuter)
 
 @Composable
 fun ArticleBadge(article: Article?, modifier: Modifier = Modifier) {

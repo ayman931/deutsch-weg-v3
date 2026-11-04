@@ -42,3 +42,11 @@ data class VocabularyWord(
         return german.trim().lowercase()
     }
 }
+
+val VocabularyWord.germanWord: String get() = german
+val VocabularyWord.arabicMeaning: String get() = arabic
+val VocabularyWord.exampleSentenceDe: String get() = exampleSentence ?: ""
+val VocabularyWord.exampleSentenceAr: String get() = exampleArabic ?: ""
+val VocabularyWord.phonetic: String get() = ""
+val VocabularyWord.cefrLevel: String get() = "B1"
+val VocabularyWord.genitiv: String? get() = null
